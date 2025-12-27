@@ -161,6 +161,16 @@ export default defineBackground(() => {
       console.log("Toggled blocking to:", isBlocking);
       saveState();
       broadcastState(); // Envia o novo estado para a UI
+
+      // Recarrega a aba ativa se for do YouTube
+      browser.tabs
+        .query({ active: true, currentWindow: true })
+        .then((tabs) => {
+          if (tabs[0] && tabs[0].id && tabs[0].url?.includes("youtube.com")) {
+            browser.tabs.reload(tabs[0].id);
+          }
+        });
+
       sendResponse({ success: true });
     }
   });
