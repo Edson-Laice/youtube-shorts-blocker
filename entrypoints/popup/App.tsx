@@ -1,47 +1,101 @@
 import { useState, useEffect } from "react";
 import "./App.css";
 
+// Interface para o estado e as estatísticas
+interface Stats {
+  totalBlocked: number;
+  apiBlocks: number;
+  domBlocks: number;
+  redirects: number;
+  isBlocking: boolean; // Adicionado para controlar o estado
+  lastUpdated: string;
+}
+
 function App() {
-  const [isBlocking, setIsBlocking] = useState<boolean>(true);
-  const [shotsBlocked, setShotsBlocked] = useState<number>(42);
-  const [blockedSites, setBlockedSites] = useState<string[]>([
-    "shots.so",
-    "dribbble.com/shots",
-    "pinterest.com",
-  ]);
+  const [stats, setStats] = useState<Stats>({
+    totalBlocked: 0,
+    apiBlocks: 0,
+    domBlocks: 0,
+    redirects: 0,
+    isBlocking: true,
+    lastUpdated: "...",
+  });
 
-  // Load initial data from storage
+  // Carrega os dados iniciais e ouve atualizações
   useEffect(() => {
-    const savedBlocked = localStorage.getItem("shotsBlocked");
-    const savedSites = localStorage.getItem("blockedSites");
+    // Pede os dados iniciais ao background script
+    browser.runtime.sendMessage({ type: "GET_STATS" }).then((initialStats) => {
+      if (initialStats) {
+        setStats(initialStats);
+      }
+    });
 
-    if (savedBlocked) setShotsBlocked(parseInt(savedBlocked));
-    if (savedSites) setBlockedSites(JSON.parse(savedSites));
+    // Ouve mensagens de atualização do background script
+    const messageListener = (message: any) => {
+      if (message.type === "STATS_UPDATE") {
+        setStats(message.stats);
+      }
+    };
+
+    browser.runtime.onMessage.addListener(messageListener);
+
+    // Limpa o listener quando o componente é desmontado
+    return () => {
+      browser.runtime.onMessage.removeListener(messageListener);
+    };
   }, []);
 
-  // Save to storage
-  useEffect(() => {
-    localStorage.setItem("shotsBlocked", shotsBlocked.toString());
-    localStorage.setItem("blockedSites", JSON.stringify(blockedSites));
-  }, [shotsBlocked, blockedSites]);
+  // Função para ativar/desativar o bloqueio
+  const handleToggleBlocking = () => {
+    browser.runtime.sendMessage({ type: "TOGGLE_EXTENSION" });
+  };
 
-  // Increment blocked counter (simulating when a site is blocked)
-  useEffect(() => {
-    if (isBlocking) {
-      const interval = setInterval(() => {
-        setShotsBlocked((prev) => prev + 1);
-      }, 5000); // Increment every 5 seconds to simulate blocking activity
+  // Função para resetar as estatísticas
+  const handleResetStats = () => {
+    browser.runtime.sendMessage({ type: "RESET_STATS" }).then(() => {
+      // Pede os dados atualizados para zerar a UI
+      browser.runtime.sendMessage({ type: "GET_STATS" }).then(setStats);
+    });
+  };
 
-      return () => clearInterval(interval);
-    }
-  }, [isBlocking]);
+  const statusClass = stats.isBlocking ? "blocking" : "not-blocking";
+  const statusText = stats.isBlocking ? "Ativo" : "Pausado";
 
   return (
     <div className="shots-blocker">
       <div className="blocker-message">
         <div className="message-header">
-          Shots Blocker está {isBlocking ? "Ativo" : "Pausado"}
+          Shorts Blocker está {statusText}
         </div>
+
+        <div className="message-content">
+          <p className="message-text">
+            <strong>{stats.totalBlocked}</strong> Shorts bloqueados até agora.
+          </p>
+          <p className="message-detail">
+            API: {stats.apiBlocks} | DOM: {stats.domBlocks} | Redirects:{" "}
+            {stats.redirects}
+          </p>
+        </div>
+
+        <div className="blocking-status">
+          <div
+            className={`status-indicator ${statusClass}`}
+            onClick={handleToggleBlocking}
+          >
+            <div className="status-dot"></div>
+            <span className="status-text">
+              {stats.isBlocking ? "Clique para pausar" : "Clique para ativar"}
+            </span>
+          </div>
+        </div>
+
+        <button
+          onClick={handleResetStats}
+          style={{ marginTop: "15px", cursor: "pointer" }}
+        >
+          Resetar Estatísticas
+        </button>
       </div>
     </div>
   );

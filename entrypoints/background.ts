@@ -1,5 +1,6 @@
 export default defineBackground(() => {
-  // Estatísticas iniciais
+  // Estado inicial
+  let isBlocking = true;
   let stats = {
     totalBlocked: 0,
     apiBlocks: 0,
@@ -7,91 +8,47 @@ export default defineBackground(() => {
     redirects: 0,
   };
 
-  // Função para salvar estatísticas no IndexDB
-  async function saveStatsToDB(): Promise<void> {
-    return new Promise((resolve) => {
-      const request = indexedDB.open("youtubeShortsBlocker", 1);
+  // --- Gerenciamento de Estado ---
 
-      request.onsuccess = () => {
-        const db = request.result;
-
-        try {
-          const transaction = db.transaction(["stats"], "readwrite");
-          const store = transaction.objectStore("stats");
-
-          const statsData = {
-            id: "backgroundStats",
-            ...stats,
-            lastUpdated: new Date().toISOString(),
-          };
-
-          const putRequest = store.put(statsData);
-
-          putRequest.onsuccess = () => {
-            console.log("💾 Estatísticas salvas no background:", stats);
-            resolve();
-          };
-
-          putRequest.onerror = () => {
-            console.error("❌ Erro ao salvar estatísticas no background");
-            resolve();
-          };
-        } catch (error) {
-          console.error("❌ Erro na transação do background:", error);
-          resolve();
-        }
-      };
-
-      request.onerror = () => {
-        console.error("❌ IndexDB não disponível no background");
-        resolve();
-      };
-    });
+  async function saveState() {
+    await browser.storage.local.set({ isBlocking, stats });
+    console.log("💾 Estado salvo:", { isBlocking, stats });
   }
 
-  // Carrega estatísticas do IndexDB
-  async function loadStatsFromDB(): Promise<void> {
-    return new Promise((resolve) => {
-      const request = indexedDB.open("youtubeShortsBlocker", 1);
-
-      request.onsuccess = () => {
-        const db = request.result;
-
-        try {
-          const transaction = db.transaction(["stats"], "readonly");
-          const store = transaction.objectStore("stats");
-          const getRequest = store.get("backgroundStats");
-
-          getRequest.onsuccess = () => {
-            if (getRequest.result) {
-              stats = getRequest.result;
-              console.log("📁 Estatísticas carregadas do background:", stats);
-            }
-            resolve();
-          };
-
-          getRequest.onerror = () => {
-            console.log("📁 Nenhuma estatística salva no background");
-            resolve();
-          };
-        } catch (error) {
-          console.error(
-            "❌ Erro ao carregar estatísticas do background:",
-            error
-          );
-          resolve();
-        }
+  async function loadState() {
+    const result = await browser.storage.local.get(["isBlocking", "stats"]);
+    if (result.isBlocking !== undefined) {
+      isBlocking = result.isBlocking;
+    }
+    if (result.stats) {
+      // Limpa para garantir que não haja propriedades undefined
+      stats = {
+        totalBlocked: result.stats.totalBlocked || 0,
+        apiBlocks: result.stats.apiBlocks || 0,
+        domBlocks: result.stats.domBlocks || 0,
+        redirects: result.stats.redirects || 0,
       };
-
-      request.onerror = () => {
-        console.error("❌ IndexDB não disponível para carregar");
-        resolve();
-      };
-    });
+    }
+    console.log("📁 Estado carregado:", { isBlocking, stats });
   }
 
-  // Inicializa carregando estatísticas
-  loadStatsFromDB();
+  // Envia o estado atual para o popup
+  function broadcastState() {
+    browser.runtime
+      .sendMessage({
+        type: "STATS_UPDATE",
+        stats: {
+          ...stats,
+          isBlocking,
+          lastUpdated: new Date().toLocaleTimeString(),
+        },
+      })
+      .catch(() => {
+        // Ignora o erro que ocorre se o popup não estiver aberto
+      });
+  }
+
+  // --- Lógica Principal ---
 
   // Função para atualizar estatísticas
   function updateStats(type: "api" | "dom" | "redirect") {
@@ -99,34 +56,25 @@ export default defineBackground(() => {
     if (type === "api") stats.apiBlocks++;
     if (type === "dom") stats.domBlocks++;
     if (type === "redirect") stats.redirects++;
-
-    // Salva no IndexDB
-    saveStatsToDB();
-
-    // Envia para popup
-    browser.runtime
-      .sendMessage({
-        type: "STATS_UPDATE",
-        stats: { ...stats, lastUpdated: new Date().toLocaleTimeString() },
-      })
-      .catch(() => {});
+    saveState();
+    broadcastState();
   }
 
-  // Bloqueia acesso direto a páginas de Shorts
+  // --- Listeners de Bloqueio ---
+
   browser.webRequest.onBeforeRequest.addListener(
     (details) => {
+      if (!isBlocking) return;
+
       const isShortsUrl =
         details.url.includes("/shorts/") &&
         (details.url.includes("youtube.com") ||
           details.url.includes("youtu.be"));
 
       if (isShortsUrl && details.type === "main_frame") {
-        console.log(`🚫 Bloqueando Short: ${details.url}`);
+        console.log(`🚫 Redirecionando Short: ${details.url}`);
         updateStats("redirect");
-
-        return {
-          redirectUrl: "https://www.youtube.com/",
-        };
+        return { redirectUrl: "https://www.youtube.com/" };
       }
     },
     {
@@ -136,9 +84,10 @@ export default defineBackground(() => {
     ["blocking"]
   );
 
-  // Intercepta requisições de API que buscam Shorts
   browser.webRequest.onBeforeRequest.addListener(
     (details) => {
+      if (!isBlocking) return;
+
       const url = details.url.toLowerCase();
       const shortsApiPatterns = [
         /\/youtubei\/v1\/reel\/reel_watch_sequence/,
@@ -148,7 +97,7 @@ export default defineBackground(() => {
         /\/youtubei\/v1\/next.*shorts/i,
         /reelItems.*shorts/i,
         /reelWatchSequence/i,
-        /\/get_reel_watch_sequence/i,
+        /\/get_reel_watch_sequence/,
         /\/get_shorts_sequence/i,
       ];
 
@@ -186,13 +135,14 @@ export default defineBackground(() => {
     ["blocking", "requestBody"]
   );
 
-  // Comunicação com popup
+  // --- Comunicação com Popup ---
+
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === "GET_STATS") {
-      // Tenta do IndexDB primeiro
-      loadStatsFromDB().then(() => {
+      loadState().then(() => {
         sendResponse({
           ...stats,
+          isBlocking,
           lastUpdated: new Date().toLocaleTimeString(),
         });
       });
@@ -201,19 +151,22 @@ export default defineBackground(() => {
 
     if (message.type === "RESET_STATS") {
       stats = { totalBlocked: 0, apiBlocks: 0, domBlocks: 0, redirects: 0 };
-      saveStatsToDB();
+      saveState();
+      broadcastState();
       sendResponse({ success: true });
     }
 
     if (message.type === "TOGGLE_EXTENSION") {
-      console.log("Extensão", message.active ? "ativada" : "desativada");
-
-      // Aqui você pode adicionar lógica para realmente ativar/desativar
-      // o bloqueio (talvez enviando mensagem para content scripts)
-
+      isBlocking = !isBlocking;
+      console.log("Toggled blocking to:", isBlocking);
+      saveState();
+      broadcastState(); // Envia o novo estado para a UI
       sendResponse({ success: true });
     }
   });
 
-  console.log("✅ YouTube Shorts Blocker ativo com IndexDB!");
+  // Inicialização
+  loadState().then(() => {
+    console.log("✅ YouTube Shorts Blocker ativo!");
+  });
 });
